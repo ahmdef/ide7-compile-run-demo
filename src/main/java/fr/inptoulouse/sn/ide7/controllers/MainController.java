@@ -1,6 +1,8 @@
 package fr.inptoulouse.sn.ide7.controllers;
 
 import fr.inptoulouse.sn.ide7.autocomplete.CompletionService;
+import fr.inptoulouse.sn.ide7.debug.CompilationError;
+import fr.inptoulouse.sn.ide7.debug.CompilationErrorParser;
 import fr.inptoulouse.sn.ide7.models.ProjectEntry;
 import fr.inptoulouse.sn.ide7.uml.JavaAttribut;
 import fr.inptoulouse.sn.ide7.uml.JavaClass;
@@ -13,6 +15,8 @@ import fr.inptoulouse.sn.ide7.uml.UMLFormatter;
 import fr.inptoulouse.sn.ide7.views.MainView;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -23,6 +27,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
@@ -93,7 +98,9 @@ public class MainController {
     private String lastSavedContent;
     private String lastGeneratedUmlText;
     private List<JavaClass> lastGeneratedUmlClasses;
-    private Process debugProcess;
+    private final BooleanProperty debugRunning = new SimpleBooleanProperty(false);
+    private Stage debugWindow;
+    private DebugRun activeDebugRun;
     private boolean dirty;
 
     public MainController(final AppController appController, ProjectEntry project) {
@@ -144,7 +151,9 @@ public class MainController {
         this.view.setOnBackRequested(new javafx.event.EventHandler<javafx.event.ActionEvent>() {
             @Override
             public void handle(javafx.event.ActionEvent event) {
-                appController.showWelcomeView();
+                if (!dirty || saveCurrentFile()) {
+                    appController.showWelcomeView();
+                }
             }
         });
         this.view.setOnRefreshRequested(new javafx.event.EventHandler<javafx.event.ActionEvent>() {
@@ -384,20 +393,20 @@ public class MainController {
         return icon;
     }
 
-    private void saveCurrentFile() {
-        saveCurrentFile(false);
+    private boolean saveCurrentFile() {
+        return saveCurrentFile(false);
     }
 
     private void autoSaveCurrentFile() {
         saveCurrentFile(true);
     }
 
-    private void saveCurrentFile(boolean autoSave) {
+    private boolean saveCurrentFile(boolean autoSave) {
         if (openedFile == null) {
             if (!autoSave) {
                 showError("No file", "Open a file before saving.");
             }
-            return;
+            return false;
         }
 
         String content = view.getEditorText();
@@ -405,7 +414,7 @@ public class MainController {
             if (!autoSave) {
                 view.setStatus("No changes to save.");
             }
-            return;
+            return true;
         }
 
         try {
@@ -413,13 +422,16 @@ public class MainController {
             lastSavedContent = content;
             dirty = false;
             view.setDirty(false);
+            autoSaveDelay.stop();
             view.setStatus((autoSave ? "Auto-saved " : "Saved ") + openedFile.getFileName());
+            return true;
         } catch (IOException e) {
             if (autoSave) {
                 view.setStatus("Auto-save failed for " + openedFile.getFileName());
             } else {
                 showError("Save failed", "Cannot save file: " + e.getMessage());
             }
+            return false;
         }
     }
 
@@ -507,11 +519,23 @@ public class MainController {
     }
 
     private void openDebugWindow() {
-        if (dirty) {
-            saveCurrentFile();
+        if (debugWindow != null) {
+            debugWindow.toFront();
+            return;
+        }
+        if (dirty && !saveCurrentFile()) {
+            return;
         }
 
         Stage stage = new Stage();
+        debugWindow = stage;
+        stage.initOwner(view.getView().getScene().getWindow());
+        stage.setOnHidden(event -> {
+            if (activeDebugRun != null) {
+                activeDebugRun.cancel();
+            }
+            debugWindow = null;
+        });
         stage.setTitle("IDE7 - Debug");
         stage.setMinWidth(840);
         stage.setMinHeight(560);
@@ -591,9 +615,17 @@ public class MainController {
         closeButton.setStyle(primaryButtonStyle("#f0f0f0", "#1a1a1a"));
         closeButton.setOnAction(event -> stage.close());
 
+        compileButton.disableProperty().bind(debugRunning);
+        runButton.disableProperty().bind(debugRunning);
+        clearButton.disableProperty().bind(debugRunning);
+        stopButton.disableProperty().bind(debugRunning.not());
         compileButton.setOnAction(event -> runDebugWorkflow(false, steps, memoryPanel, console, chronoLabel, stage));
         runButton.setOnAction(event -> runDebugWorkflow(true, steps, memoryPanel, console, chronoLabel, stage));
-        stopButton.setOnAction(event -> stopDebugProcess(steps, console));
+        stopButton.setOnAction(event -> {
+            if (activeDebugRun != null && activeDebugRun.cancel()) {
+                addDebugStep(steps, "Arrêt demandé", "Arrêt du processus en cours.", "#475569");
+            }
+        });
 
         HBox actions = new HBox(10, compileButton, runButton, stopButton, clearButton, closeButton);
         actions.setAlignment(Pos.CENTER_RIGHT);
@@ -601,34 +633,30 @@ public class MainController {
         ScrollPane memoryScrollPane = new ScrollPane(memoryPanel);
         memoryScrollPane.setFitToWidth(true);
         memoryScrollPane.setPannable(true);
-        memoryScrollPane.setMinWidth(360);
-        memoryScrollPane.setPrefWidth(520);
+        memoryScrollPane.setMinWidth(265);
+        memoryScrollPane.setPrefWidth(360);
         memoryScrollPane.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
 
-        HBox debugPanels = new HBox(12, stepsScroll, memoryPanel);
+        HBox debugPanels = new HBox(12, stepsScroll, memoryScrollPane);
         HBox.setHgrow(stepsScroll, Priority.ALWAYS);
+        debugPanels.setPrefHeight(300);
+        debugPanels.setMinHeight(160);
+        console.setPrefHeight(180);
+        console.setMinHeight(125);
 
-       debugPanels.setPrefHeight(330);
-       debugPanels.setMinHeight(260);
-       debugPanels.setMaxHeight(330);
+        VBox header = new VBox(3, title, targetLabel, chronoLabel);
+        VBox content = new VBox(14, header, actions, debugPanels, console);
+        content.setPadding(new Insets(18));
+        content.setPrefSize(920, 640);
+        content.setMinSize(800, 520);
+        content.setStyle("-fx-background-color: white;");
 
-       console.setPrefHeight(220);
-       console.setMinHeight(180);
-       console.setMaxHeight(220);
+        VBox.setVgrow(debugPanels, Priority.ALWAYS);
+        VBox.setVgrow(console, Priority.ALWAYS);
 
-       VBox header = new VBox(3, title, targetLabel, chronoLabel);
-       VBox content = new VBox(14, header, actions, debugPanels, console);
-       content.setPadding(new Insets(18));
-       content.setPrefSize(920, 640);
-       content.setMinSize(800, 520);
-       content.setStyle("-fx-background-color: white;");
-
-       VBox.setVgrow(debugPanels, Priority.NEVER);
-       VBox.setVgrow(console, Priority.NEVER);
-
-       stage.setScene(new Scene(content, 920, 640));
-       stage.show();
-       stage.toFront();
+        stage.setScene(new Scene(content, 920, 640));
+        stage.show();
+        stage.toFront();
     }
     
     private String getDebugMainClassLabel() {
@@ -643,11 +671,18 @@ public class MainController {
     }
 
     private void runDebugWorkflow(boolean executeAfterCompile, VBox steps, VBox memoryPanel, TextArea console, Label chronoLabel, Stage stage) {
-        if (openedFile == null || !openedFile.toString().endsWith(".java")) {
+        if (debugRunning.get() || (dirty && !saveCurrentFile())) {
+            return;
+        }
+        Path targetFile = openedFile;
+        if (executeAfterCompile && (targetFile == null || !targetFile.toString().endsWith(".java"))) {
             showError("Debug impossible", "Ouvre d'abord le fichier Java contenant la methode main.");
             return;
         }
 
+        DebugRun run = new DebugRun();
+        activeDebugRun = run;
+        debugRunning.set(true);
         steps.getChildren().clear();
         memoryPanel.getChildren().clear();
         console.clear();
@@ -672,30 +707,38 @@ public class MainController {
                     }
 
                     addDebugStepAsync(steps, "Compilation", sources.size() + " fichier(s) Java", "#888888");
-                    ExecutionResultInfo compileResult = compileProjectSources(sources, outputDirectory);
+                    ExecutionResultInfo compileResult = compileProjectSources(sources, outputDirectory, run);
 
                     if (!compileResult.output.isEmpty()) {
                         appendDebugConsole(console, "[COMPILATION]\n" + compileResult.output + "\n");
                     }
 
+                    if (run.isCancelled()) {
+                        return;
+                    }
                     if (compileResult.exitCode != 0) {
-                        addDebugStepAsync(steps, "Compilation echouee", "Code retour " + compileResult.exitCode, "#888888");
-                        updateChrono(chronoLabel, startTime);
+                        addDebugStepAsync(steps, "Compilation échouée", "Code retour " + compileResult.exitCode, "#b91c1c");
+                        for (CompilationError error : new CompilationErrorParser().parse(compileResult.output)) {
+                            Path source = project.getPath().resolve(error.getSourcePath()).normalize();
+                            if (sources.contains(source)) {
+                                addDiagnosticLink(steps, "Ligne " + error.getLine() + " dans " + source.getFileName(),
+                                    error.getMessage(), () -> openDiagnostic(source, error.getLine(), stage));
+                            }
+                        }
                         return;
                     }
 
                     addDebugStepAsync(steps, "Compilation reussie", outputDirectory.toString(), "#888888");
 
                     if (!executeAfterCompile) {
-                        updateChrono(chronoLabel, startTime);
                         return;
                     }
 
-                    String mainClass = getMainClassName(openedFile);
+                    String mainClass = getMainClassName(targetFile);
                     addDebugStepAsync(steps, "Execution", mainClass, "#888888");
 
                     // Lance l'exécution avec stdout ET stderr séparés
-                    ExecutionResultInfoFull runResult = executeMainClassFull(mainClass, outputDirectory, memoryPanel);
+                    ExecutionResultInfoFull runResult = executeMainClassFull(mainClass, outputDirectory, memoryPanel, run);
 
                     // Affiche stdout
                     if (!runResult.stdout.isEmpty()) {
@@ -734,8 +777,9 @@ public class MainController {
                         }
                     }
 
-                    updateChrono(chronoLabel, startTime);
-
+                    if (run.isCancelled()) {
+                        return;
+                    }
                     if (runResult.exitCode == 0) {
                         addDebugStepAsync(steps, "Execution terminee",
                             "Succes · pic memoire " + formatMemory(runResult.peakMemoryKb), "#888888");
@@ -746,9 +790,23 @@ public class MainController {
                     }
 
                 } catch (Exception e) {
-                    appendDebugConsole(console, "[ERREUR INTERNE] " + e.getMessage() + "\n");
-                    addDebugStepAsync(steps, "Erreur", e.getMessage(), "#888888");
+                    if (!run.isCancelled()) {
+                        appendDebugConsole(console, "[ERREUR INTERNE] " + e.getMessage() + "\n");
+                        addDebugStepAsync(steps, "Erreur", e.getMessage(), "#b91c1c");
+                    }
+                    if (e instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                } finally {
+                    if (run.isCancelled()) {
+                        appendDebugConsole(console, "\nProcessus arrêté par l'utilisateur.\n");
+                        addDebugStepAsync(steps, "Processus arrêté", "Arrêt demandé par l'utilisateur.", "#475569");
+                    }
                     updateChrono(chronoLabel, startTime);
+                    Platform.runLater(() -> {
+                        activeDebugRun = null;
+                        debugRunning.set(false);
+                    });
                 }
             }
         });
@@ -770,8 +828,9 @@ public class MainController {
         return sources;
     }
 
-    private ExecutionResultInfo compileProjectSources(List<Path> sources, Path outputDirectory) throws IOException, InterruptedException {
-        List<String> command = new ArrayList<String>();
+    private ExecutionResultInfo compileProjectSources(List<Path> sources, Path outputDirectory, DebugRun run)
+        throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>();
         command.add("javac");
         command.add("-encoding");
         command.add("UTF-8");
@@ -780,65 +839,17 @@ public class MainController {
         for (Path source : sources) {
             command.add(source.toString());
         }
-        return runProcess(command, project.getPath());
-    }
 
-    private ExecutionResultInfo executeMainClass(String mainClass, Path outputDirectory) throws IOException, InterruptedException {
-        return executeMainClass(mainClass, outputDirectory, null);
-    }
-
-    private ExecutionResultInfo executeMainClass(String mainClass, Path outputDirectory, VBox memoryPanel)
-        throws IOException, InterruptedException {
-        List<String> command = new ArrayList<String>();
-        command.add("java");
-        command.add("-cp");
-        command.add(outputDirectory.toString());
-        command.add(mainClass);
-        return runProcess(command, project.getPath(), memoryPanel);
-    }
-
-    private ExecutionResultInfo runProcess(List<String> command, Path directory) throws IOException, InterruptedException {
-        return runProcess(command, directory, null);
-    }
-
-    private ExecutionResultInfo runProcess(List<String> command, Path directory, VBox memoryPanel)
-        throws IOException, InterruptedException {
         ProcessBuilder builder = new ProcessBuilder(command);
-        builder.directory(directory.toFile());
+        builder.directory(project.getPath().toFile());
         builder.redirectErrorStream(true);
-        Process process = builder.start();
-        debugProcess = process;
-        AtomicBoolean monitorRunning = new AtomicBoolean(true);
-        AtomicLong peakMemoryKb = new AtomicLong(-1L);
-
-        Thread memoryMonitor = null;
-        if (memoryPanel != null) {
-            memoryMonitor = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    monitorProcessMemory(process, memoryPanel, monitorRunning, peakMemoryKb);
-                }
-            });
-            memoryMonitor.setDaemon(true);
-            memoryMonitor.start();
+        Process process = run.start(builder);
+        try {
+            String output = readProcessOutput(process.getInputStream());
+            return new ExecutionResultInfo(process.waitFor(), output);
+        } finally {
+            run.finished(process);
         }
-
-        String output = readProcessOutput(process.getInputStream());
-        int exitCode = process.waitFor();
-        monitorRunning.set(false);
-        if (memoryMonitor != null) {
-            memoryMonitor.join(1000);
-            addMemorySnapshotAsync(
-                memoryPanel,
-                "Résumé mémoire",
-                "Pic observe: " + formatMemory(peakMemoryKb.get()),
-                exitCode == 0 ? "#15803d" : "#dc2626"
-            );
-        }
-        if (debugProcess == process) {
-            debugProcess = null;
-        }
-        return new ExecutionResultInfo(exitCode, output, peakMemoryKb.get());
     }
 
     private void monitorProcessMemory(
@@ -938,173 +949,103 @@ public class MainController {
         );
     }
 
-    /**
-     * Ajoute une carte cliquable dans les étapes.
-     * Au clic, ouvre le fichier Java à la ligne indiquée dans l'éditeur.
-     */
     private void addClickableErrorStep(VBox steps, Stage debugStage,
                                        String title, String detail,
                                        String fileName, int lineNumber) {
-        Platform.runLater(() -> {
-            Label titleLabel = new Label(">>> " + title);
-            titleLabel.setTextFill(Color.web("#1a1a1a"));
-            titleLabel.setStyle("-fx-font-weight: bold; -fx-underline: true; -fx-cursor: hand;");
-
-            Label detailLabel = new Label(detail);
-            detailLabel.setTextFill(Color.web("#555555"));
-            detailLabel.setWrapText(true);
-
-            VBox card = new VBox(2, titleLabel, detailLabel);
-            card.setPadding(new Insets(9, 12, 9, 12));
-            card.setStyle(
-                "-fx-background-color: #f5f5f5;"
-                    + "-fx-border-color: #888888;"
-                    + "-fx-border-width: 0 0 0 4;"
-                    + "-fx-background-radius: 4;"
-                    + "-fx-border-radius: 4;"
-                    + "-fx-cursor: hand;"
-            );
-
-            card.setOnMouseClicked(event -> {
-                // Cherche le fichier dans le projet
-                try {
-                    java.util.Optional<Path> found;
-                    try (java.util.stream.Stream<Path> walk = Files.walk(project.getPath())) {
-                        found = walk
-                            .filter(p -> p.getFileName().toString().equals(fileName))
-                            .findFirst();
-                    }
-                    if (found.isPresent()) {
-                        Path target = found.get();
-                        // Ouvre le fichier dans l'éditeur principal
-                        openFile(target);
-                        // Calcule la position du caret à la ligne voulue
-                        Platform.runLater(() -> {
-                            String text = view.getEditorText();
-                            String[] lines = text.split("\n", -1);
-                            int pos = 0;
-                            int targetLine = Math.min(lineNumber - 1, lines.length - 1);
-                            for (int i = 0; i < targetLine; i++) {
-                                pos += lines[i].length() + 1;
-                            }
-                            int lineEnd = pos + (targetLine < lines.length ? lines[targetLine].length() : 0);
-                            view.selectEditorRange(pos, lineEnd);
-                            // Ferme la fenêtre debug pour voir l'éditeur
-                            debugStage.close();
-                        });
-                    } else {
-                        showError("Fichier introuvable", "Impossible de trouver " + fileName + " dans le projet.");
-                    }
-                } catch (IOException ex) {
-                    showError("Erreur", ex.getMessage());
+        addDiagnosticLink(steps, title, detail, () -> {
+            try (Stream<Path> files = Files.walk(project.getPath())) {
+                Path source = files.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().equals(fileName))
+                    .findFirst().orElse(null);
+                if (source == null) {
+                    showError("Fichier introuvable", "Impossible de trouver " + fileName + " dans le projet.");
+                    return;
                 }
-            });
+                openDiagnostic(source, lineNumber, debugStage);
+            } catch (IOException e) {
+                showError("Erreur", e.getMessage());
+            }
+        });
+    }
 
-            // Effet hover
-            card.setOnMouseEntered(e -> card.setStyle(
-                "-fx-background-color: #ebebeb;"
-                    + "-fx-border-color: #555555;"
-                    + "-fx-border-width: 0 0 0 4;"
-                    + "-fx-background-radius: 4;"
-                    + "-fx-border-radius: 4;"
-                    + "-fx-cursor: hand;"
-            ));
-            card.setOnMouseExited(e -> card.setStyle(
-                "-fx-background-color: #f5f5f5;"
-                    + "-fx-border-color: #888888;"
-                    + "-fx-border-width: 0 0 0 4;"
-                    + "-fx-background-radius: 4;"
-                    + "-fx-border-radius: 4;"
-                    + "-fx-cursor: hand;"
-            ));
+    private void addDiagnosticLink(VBox steps, String title, String message, Runnable navigate) {
+        Platform.runLater(() -> {
+            Hyperlink link = new Hyperlink(title);
+            link.setStyle("-fx-font-weight: bold;");
+            link.setOnAction(event -> navigate.run());
 
+            Label detail = new Label(message);
+            detail.setTextFill(Color.web("#555555"));
+            detail.setWrapText(true);
+
+            VBox card = new VBox(2, link, detail);
+            card.setPadding(new Insets(9, 12, 9, 12));
+            card.setStyle("-fx-background-color: #fff7ed; -fx-background-radius: 4;");
             steps.getChildren().add(card);
         });
     }
 
-    /**
-     * Exécute une classe Java en capturant stdout ET stderr dans des buffers séparés.
-     * Remplace executeMainClass() pour le workflow debug.
-     */
-    private ExecutionResultInfoFull executeMainClassFull(String mainClass, Path outputDirectory, VBox memoryPanel)
+    private void openDiagnostic(Path source, int lineNumber, Stage debugStage) {
+        if (!openFile(source)) {
+            return;
+        }
+        String[] lines = view.getEditorText().split("\\R", -1);
+        int targetLine = Math.max(0, Math.min(lineNumber - 1, lines.length - 1));
+
+        java.util.regex.Matcher separator = java.util.regex.Pattern.compile("\\R").matcher(view.getEditorText());
+        int start = 0;
+        for (int i = 0; i < targetLine && separator.find(); i++) {
+            start = separator.end();
+        }
+        debugStage.close();
+        view.requestEditorFocus();
+        view.selectEditorRange(start, start + lines[targetLine].length());
+    }
+
+    private ExecutionResultInfoFull executeMainClassFull(String mainClass, Path outputDirectory,
+                                                           VBox memoryPanel, DebugRun run)
         throws IOException, InterruptedException {
 
-        List<String> command = new ArrayList<>();
-        command.add("java");
-        command.add("-cp");
-        command.add(outputDirectory.toString());
-        command.add(mainClass);
-
-        ProcessBuilder builder = new ProcessBuilder(command);
+        ProcessBuilder builder = new ProcessBuilder("java", "-cp", outputDirectory.toString(), mainClass);
         builder.directory(project.getPath().toFile());
-        builder.redirectErrorStream(false); // NE PAS fusionner stdout/stderr
-
-        Process process = builder.start();
-        debugProcess = process;
-
+        Process process = run.start(builder);
         AtomicBoolean monitorRunning = new AtomicBoolean(true);
         AtomicLong peakMemoryKb = new AtomicLong(-1L);
 
-        // Lecture stdout
-        StringBuilder stdoutBuf = new StringBuilder();
-        Thread stdoutThread = new Thread(() -> {
-            try {
-                byte[] bytes = process.getInputStream().readAllBytes();
-                stdoutBuf.append(new String(bytes, StandardCharsets.UTF_8));
-            } catch (IOException e) { /* ignore */ }
-        });
+        StringBuilder stdout = new StringBuilder();
+        StringBuilder stderr = new StringBuilder();
+        Thread stdoutReader = new Thread(() -> collectProcessOutput(process.getInputStream(), stdout));
+        Thread stderrReader = new Thread(() -> collectProcessOutput(process.getErrorStream(), stderr));
+        Thread memoryMonitor = new Thread(() -> monitorProcessMemory(process, memoryPanel, monitorRunning, peakMemoryKb));
+        stdoutReader.setDaemon(true);
+        stderrReader.setDaemon(true);
+        memoryMonitor.setDaemon(true);
 
-        // Lecture stderr
-        StringBuilder stderrBuf = new StringBuilder();
-        Thread stderrThread = new Thread(() -> {
-            try {
-                byte[] bytes = process.getErrorStream().readAllBytes();
-                stderrBuf.append(new String(bytes, StandardCharsets.UTF_8));
-            } catch (IOException e) { /* ignore */ }
-        });
-
-        // Suivi mémoire
-        Thread memoryMonitor = null;
-        if (memoryPanel != null) {
-            memoryMonitor = new Thread(() -> monitorProcessMemory(process, memoryPanel, monitorRunning, peakMemoryKb));
-            memoryMonitor.setDaemon(true);
+        try {
+            stdoutReader.start();
+            stderrReader.start();
             memoryMonitor.start();
-        }
-
-        stdoutThread.start();
-        stderrThread.start();
-
-        int exitCode = process.waitFor();
-        stdoutThread.join();
-        stderrThread.join();
-
-        monitorRunning.set(false);
-        if (memoryMonitor != null) {
+            int exitCode = process.waitFor();
+            stdoutReader.join();
+            stderrReader.join();
+            monitorRunning.set(false);
             memoryMonitor.join(1000);
-            addMemorySnapshotAsync(
-                memoryPanel,
-                "Resume memoire",
-                "Pic observe: " + formatMemory(peakMemoryKb.get()),
-                "#888888"
-            );
-        }
 
-        if (debugProcess == process) {
-            debugProcess = null;
+            addMemorySnapshotAsync(memoryPanel, "Résumé mémoire",
+                "Pic observé : " + formatMemory(peakMemoryKb.get()), "#888888");
+            return new ExecutionResultInfoFull(exitCode, stdout.toString(), stderr.toString(), peakMemoryKb.get());
+        } finally {
+            monitorRunning.set(false);
+            run.finished(process);
         }
-
-        return new ExecutionResultInfoFull(exitCode, stdoutBuf.toString(), stderrBuf.toString(), peakMemoryKb.get());
     }
-    
-    private void stopDebugProcess(VBox steps, TextArea console) {
-        Process process = debugProcess;
-        if (process == null || !process.isAlive()) {
-            addDebugStep(steps, "Arret", "Aucun processus en cours", "#475569");
-            return;
+
+    private void collectProcessOutput(InputStream stream, StringBuilder output) {
+        try {
+            output.append(readProcessOutput(stream));
+        } catch (IOException ignored) {
+            // The stream can be closed when the user stops the process.
         }
-        process.destroyForcibly();
-        appendDebugConsole(console, "\nProcessus arrete par l'utilisateur.\n");
-        addDebugStep(steps, "Arret", "Processus termine", "#dc2626");
     }
 
     private void addDebugStepAsync(VBox steps, String title, String detail, String color) {
@@ -2274,7 +2215,10 @@ public class MainController {
         return parent;
     }
 
-    private void openFile(Path file) {
+    private boolean openFile(Path file) {
+        if (dirty && !saveCurrentFile()) {
+            return false;
+        }
         try {
             String content = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
             autoSaveDelay.stop();
@@ -2289,8 +2233,10 @@ public class MainController {
             view.setDirty(false);
             view.setCurrentFileLabel("Fichier: " + file);
             view.setStatus("Opened " + file.getFileName());
+            return true;
         } catch (IOException e) {
             showError("Open failed", "Cannot open file: " + e.getMessage());
+            return false;
         }
     }
 
@@ -2630,9 +2576,11 @@ public class MainController {
             return;
         }
         if (event.getCode() == KeyCode.ESCAPE
+            || event.getCode() == KeyCode.TAB
             || event.getCode() == KeyCode.SPACE
             || event.getCode() == KeyCode.BACK_SPACE
-            || event.getCode() == KeyCode.DELETE) {
+            || event.getCode() == KeyCode.DELETE
+            || event.isShortcutDown()) {
             view.hideCompletionSuggestions();
             return;
         }
@@ -2933,23 +2881,53 @@ public class MainController {
     }
     
     
+    private static class DebugRun {
+        private Process process;
+        private boolean cancelled;
+
+        synchronized Process start(ProcessBuilder builder) throws IOException, InterruptedException {
+            if (cancelled) {
+                throw new InterruptedException("Run cancelled");
+            }
+            process = builder.start();
+            return process;
+        }
+
+        synchronized boolean cancel() {
+            if (cancelled) {
+                return false;
+            }
+            cancelled = true;
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+            return true;
+        }
+
+        synchronized boolean isCancelled() {
+            return cancelled;
+        }
+
+        synchronized void finished(Process finishedProcess) {
+            if (finishedProcess.isAlive()) {
+                finishedProcess.destroyForcibly();
+            }
+            if (process == finishedProcess) {
+                process = null;
+            }
+        }
+    }
+
     private static class ExecutionResultInfo {
         private final int exitCode;
         private final String output;
-        private final long peakMemoryKb;
 
         private ExecutionResultInfo(int exitCode, String output) {
-            this(exitCode, output, -1L);
-        }
-
-        private ExecutionResultInfo(int exitCode, String output, long peakMemoryKb) {
             this.exitCode = exitCode;
-            this.output = output == null ? "" : output;
-            this.peakMemoryKb = peakMemoryKb;
+            this.output = output;
         }
     }
-    
-    
+
     private static class ExecutionResultInfoFull {
         final int exitCode;
         final String stdout;

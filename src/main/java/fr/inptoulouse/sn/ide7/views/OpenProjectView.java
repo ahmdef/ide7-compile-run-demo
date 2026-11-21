@@ -30,7 +30,6 @@ public class OpenProjectView {
     private final Button openButton;
     private final Button newProjectButton;
     private final Button cancelButton;
-    private File selectedDirectory;
     private Window ownerWindow;
 
     public OpenProjectView() {
@@ -38,8 +37,7 @@ public class OpenProjectView {
         title.setStyle("-fx-font-size: 22px; -fx-font-weight: bold; -fx-text-fill: #0f172a;");
 
         this.pathField = new TextField("");
-        this.pathField.setEditable(false);
-        this.selectedDirectory = null;
+        this.pathField.setPromptText("Saisir le chemin du dossier");
 
         this.browseButton = new Button("Parcourir");
         this.browseButton.setGraphic(createIcon(AntDesignIconsOutlined.SEARCH, "#1d4ed8"));
@@ -52,7 +50,9 @@ public class OpenProjectView {
         form.setPadding(new Insets(20));
         GridPane.setHgrow(pathField, Priority.ALWAYS);
         this.pathField.setMaxWidth(Double.MAX_VALUE);
-        form.add(new Label("Chemin"), 0, 0);
+        Label pathLabel = new Label("Chemin");
+        pathLabel.setLabelFor(pathField);
+        form.add(pathLabel, 0, 0);
         form.add(pathField, 1, 0);
         form.add(browseButton, 2, 0);
 
@@ -69,6 +69,7 @@ public class OpenProjectView {
         this.newProjectButton.setGraphicTextGap(6);
         this.cancelButton.setGraphicTextGap(6);
         this.openButton.setDefaultButton(true);
+        this.openButton.disableProperty().bind(pathField.textProperty().isEmpty());
         this.cancelButton.setCancelButton(true);
 
         HBox actions = new HBox(12, cancelButton, newProjectButton, openButton);
@@ -96,11 +97,11 @@ public class OpenProjectView {
     }
 
     public File getSelectedDirectory() {
-        return this.selectedDirectory;
+        String path = pathField.getText().trim();
+        return path.isEmpty() ? null : new File(path).getAbsoluteFile();
     }
 
     public void setSelectedDirectory(File selectedDirectory) {
-        this.selectedDirectory = selectedDirectory;
         if (selectedDirectory != null) {
             this.pathField.setText(selectedDirectory.getAbsolutePath());
         } else {

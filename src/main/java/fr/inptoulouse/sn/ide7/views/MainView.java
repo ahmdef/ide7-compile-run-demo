@@ -24,6 +24,8 @@ import javafx.scene.control.TreeView;
 import javafx.scene.input.DragEvent;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
@@ -175,6 +177,9 @@ public class MainView {
                 event.consume();
             }
         });
+
+        saveMenuItem.setAccelerator(new KeyCodeCombination(KeyCode.S, KeyCombination.SHORTCUT_DOWN));
+        findMenuItem.setAccelerator(new KeyCodeCombination(KeyCode.F, KeyCombination.SHORTCUT_DOWN));
 
         Menu fileMenu = new Menu("Fichier");
         fileMenu.getItems().addAll(
@@ -493,7 +498,10 @@ public class MainView {
     public void setOnSearchRequested(EventHandler<ActionEvent> handler) {
         this.searchButton.setOnAction(handler);
         this.searchField.setOnAction(handler);
-        this.findMenuItem.setOnAction(handler);
+        this.findMenuItem.setOnAction(event -> {
+            searchField.requestFocus();
+            searchField.selectAll();
+        });
     }
 
     public void setOnUndoRequested(EventHandler<ActionEvent> handler) {
@@ -620,7 +628,7 @@ public class MainView {
     }
 
     public void setOnEditorKeyPressed(EventHandler<KeyEvent> handler) {
-        this.editorArea.setOnKeyPressed(handler);
+        this.editorArea.addEventFilter(KeyEvent.KEY_PRESSED, handler);
     }
 
     public String getCurrentEditorPrefix() {
