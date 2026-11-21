@@ -1,12 +1,24 @@
-# IDE7 · Compile and run Java
+# IDE7
 
-IDE7 is a Java IDE built by an eight-person student team at ENSEEIHT. This case study shows what happens when a Java file fails to compile and how the IDE runs it once the error is fixed.
+IDE7 is a JavaFX development environment built by an eight-person student team at ENSEEIHT. It provides a Java editor, code completion, a compile-and-run workflow, debugger tools, and a UML class diagram editor.
 
-## My contribution
+## Run locally
 
-I worked with one teammate on compilation and execution. My contributions included parsing compiler output into diagnostics with a line number and a message, adding debugger panels, and working on breakpoint support.
+Install JDK 21 and Maven 3.9 or later. Check that `java`, `javac`, and `mvn` are available in your terminal. From the repository root:
 
-## Demo · From a compiler error to output
+```sh
+mvn compile javafx:run
+```
+
+Run `mvn verify` to build the application. The build was verified with JDK 21 and Maven 3.9.16.
+
+Open a folder containing a Java program, select the file with its `main` method, and use the IDE's run controls. The app calls the Java compiler, displays diagnostics if compilation fails, and shows the program's output when it runs.
+
+## Team and contribution
+
+This was a team project completed at ENSEEIHT. I worked with one teammate on the compilation and execution workflow. I contributed compiler diagnostic parsing, debugger panels, and breakpoint support.
+
+## Compile-and-run walkthrough
 
 **1. Compile a Java program with a missing semicolon.** The sample adds the squares of the integers from 1 through 5. With the semicolon removed from line 5, IDE7's compile-and-run service stops before execution. Its diagnostic parser returns:
 
